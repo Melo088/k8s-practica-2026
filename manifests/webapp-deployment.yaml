@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: webapp-deployment
 spec:
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: hola-mundo
@@ -14,6 +14,8 @@ spec:
     spec:
       containers:
       - name: app-container
-        image: nginx:alpine
+        image: melo15036/webapp:v1
         ports:
-        - containerPort: 80
+        - containerPort: 5000
+      imagePullSecrets:
+      - name: regcred

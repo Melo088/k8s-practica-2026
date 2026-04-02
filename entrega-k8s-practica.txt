@@ -1,0 +1,5 @@
+Despliegue de Aplicaciones en Kubernetes (Entorno kubeadm)
+
+Juan Camilo Melo López
+[A00401994]
+https://github.com/Melo088/k8s-practica-2026.git
