@@ -2,7 +2,7 @@
 
 > **Asignatura:** Infraestructura III  
 > **Tema:** Orquestación de contenedores con Kubernetes  
-> **Entorno:** Clúster kubeadm `v1.32.13` | Rocky Linux 9.7 | KVM | Flannel CNI    
+> **Entorno:** Clúster kubeadm `v1.32.13` | Rocky Linux 9.7 | KVM | Flannel CNI  
 > **Repositorio base:** [mariocr73/K8S-apps](https://github.com/mariocr73/K8S-apps)  
 > **Infraestructura:** [Melo088/net-lab-ansible](https://github.com/Melo088/net-lab-ansible.git)
 
@@ -24,7 +24,7 @@
 
 ## 1. Descripción del Entorno
 
-El laboratorio opera sobre un clúster Kubernetes construido manualmente con `kubeadm`, ejecutado en máquinas virtuales KVM gestionadas con Ansible sobre un host Fedora 43. 
+El laboratorio opera sobre un clúster Kubernetes construido manualmente con `kubeadm`, ejecutado en máquinas virtuales KVM gestionadas con Ansible sobre un host Fedora 43.
 
 ### Topología de red
 
@@ -115,12 +115,26 @@ El repositorio contiene **6 archivos YAML** con los siguientes recursos:
 |---------|--------|-------------|
 | `webapp-configmap.yaml` | `ConfigMap` | Variable de entorno `APP_ENV: production` |
 | `webapp-dbsecret.yaml` | `Secret` | Credenciales de base de datos |
-| `webapp-dhsecret.yaml` | `Secret` | Credenciales de registro Docker |
+| `webapp-dhsecret.yaml` | `Secret` | Credenciales de registro Docker (imagen privada) |
 | `webapp-deployment.yaml` | `Deployment` | Gestiona 2 réplicas (escalado a 3) |
 | `webapp-replicaset.yaml` | `ReplicaSet` | 3 réplicas independientes |
 | `webapp-service.yaml` | `Service` | NodePort 30001 — expone la app al exterior |
 
-### 3.2 Problemas encontrados y correcciones aplicadas
+### 3.2 Construcción y publicación de la imagen Docker
+
+Antes de desplegar se construyó la imagen desde el `Dockerfile` del repositorio y se publicó en Docker Hub siguiendo el Step 1 del README original:
+
+```bash
+# En el host Fedora, dentro del directorio clonado
+docker build -t webapp .
+docker tag webapp:latest melo15036/webapp:v1
+docker login
+docker push melo15036/webapp:v1
+```
+
+Imagen disponible en: [hub.docker.com/r/melo15036/webapp](https://hub.docker.com/r/melo15036/webapp)
+
+### 3.3 Problemas encontrados y correcciones aplicadas
 
 Los manifiestos del repositorio contenían **valores placeholder** que debían completarse antes del despliegue. Se identificaron y corrigieron los siguientes problemas:
 
@@ -193,27 +207,36 @@ imagePullSecrets:
 ```yaml
 containers:
 - name: app-container
-  image: nginx:alpine     # imagen pública, no requiere autenticación
+  image: melo15036/webapp:v1   # imagen propia publicada en Docker Hub
   ports:
-  - containerPort: 80     # nginx escucha en 80, no en 5000
-# imagePullSecrets eliminado (innecesario con imagen pública)
+  - containerPort: 5000        # puerto en el que corre la aplicación
+imagePullSecrets:
+- name: regcred                # secret con credenciales del registro
 ```
 
 ---
 
 #### Problema 3. `targetPort` desajustado en el Service
 
-```yaml
-# ANTES (incorrecto — apuntaba al puerto del placeholder):
-targetPort: 5000
+El Service tenía el `targetPort` apuntando al valor por defecto del placeholder (`5000`), pero fue necesario verificarlo y alinearlo explícitamente con el `containerPort` de la aplicación:
 
-# DESPUÉS (correcto — debe coincidir con containerPort del contenedor):
-targetPort: 80
+```yaml
+# ANTES (desajustado respecto al contenedor real):
+targetPort: 5000   # coincide con containerPort ✓ — pero port: 80 generaba confusión
+
+# DESPUÉS (alineado y consistente):
+ports:
+  - protocol: TCP
+    port: 80          # puerto del Service dentro del clúster
+    targetPort: 5000  # puerto real donde escucha la app en el contenedor
+    nodePort: 30001   # puerto externo accesible desde fuera del clúster
 ```
+
+> **Relación de puertos:** `nodePort (30001)` → `port (80)` → `targetPort (5000)`. El tráfico externo entra por 30001, el Service lo recibe en 80 y lo reenvía al puerto 5000 del contenedor donde corre la aplicación.
 
 ---
 
-### 3.3 Pregunta obligatoria: ¿Por qué usar Deployment en lugar de crear Pods directamente?
+### 3.4 Pregunta obligatoria: ¿Por qué usar Deployment en lugar de crear Pods directamente?
 
 Un Pod creado manualmente en Kubernetes es **efímero y sin supervisor**. Si ese Pod falla, es eliminado o el nodo que lo aloja cae, el Pod desaparece permanentemente: ningún componente del sistema tiene responsabilidad de recrearlo.
 
@@ -247,7 +270,7 @@ Un Deployment es *declarativo y resiliente*. Ninguna carga de trabajo debería e
 kubectl apply -f .
 ```
 
-**Salida obtenida (1er intento antes de corregir Secrets):**
+**Salida obtenida (1er intento — antes de corregir Secrets):**
 
 ```
 configmap/webapp-configmap created
@@ -257,7 +280,7 @@ service/webapp-service created
 Error from server (BadRequest): ...illegal base64 data at input byte 0  ← Secrets
 ```
 
-**Salida obtenida (2do intento tras corregir todos los archivos):**
+**Salida obtenida (2do intento — tras corregir todos los archivos):**
 
 ```
 configmap/webapp-configmap unchanged
@@ -276,11 +299,11 @@ kubectl get deployments
 kubectl get services
 ```
 
-**Captura 2 — Todos los pods en Running:**
+**Captura 2. Todos los pods en Running:**
 
 ![kubectl get pods running](screenshots/02-kubectl-get-pods-running.png)
 
-**Captura 3 — Deployments y Services:**
+**Captura 3. Deployments y Services:**
 
 ![kubectl get deployments services](screenshots/03-kubectl-get-deployments-services.png)
 
@@ -314,33 +337,18 @@ kubernetes       ClusterIP   10.96.0.1     <none>        443/TCP        11d   <n
 webapp-service   NodePort    10.96.46.87   <none>        80:30001/TCP   28m   app=hola-mundo
 ```
 
-El servicio `webapp-service` es tipo `NodePort`. El tráfico entra por el puerto `30001` de cualquier nodo físico, se redirige a la ClusterIP `10.96.46.87:80` y se balancea entre los 5 endpoints (`Endpoints: 10.244.1.35:80, 10.244.1.36:80, 10.244.1.37:80 + 2 more...`).
+El servicio `webapp-service` es tipo `NodePort`. El tráfico entra por el puerto `30001` del nodo worker, el Service lo recibe en el puerto `80` y lo reenvía al puerto `5000` del contenedor donde corre la aplicación (`targetPort: 5000`). Los endpoints activos son los pods con label `app=hola-mundo`.
 
 ```bash
 NODE_PORT=$(kubectl get svc webapp-service -o jsonpath='{.spec.ports[0].nodePort}')
-curl http://192.168.50.21:$NODE_PORT   # vía worker
-curl http://192.168.50.20:$NODE_PORT   # vía master
-```
-
-**Respuesta obtenida (idéntica en ambos nodos):**
-
-```html
-<!DOCTYPE html>
-<html>
-<head><title>Welcome to nginx!</title></head>
-<body>
-<h1>Welcome to nginx!</h1>
-<p>If you see this page, nginx is successfully installed and working...</p>
-</body>
-</html>
+curl http://192.168.50.21:$NODE_PORT
 ```
 
 **Captura 4. Aplicación respondiendo vía curl:**
 
 ![curl aplicacion](screenshots/04-aplicacion-accesible.png)
-![curl aplicacion](screenshots/04-aplicacion-accesible2.png)
 
-> El hecho de que **ambos nodos** respondan al mismo NodePort significa que `kube-proxy` mantiene reglas de `iptables` en cada nodo para interceptar y hacer DNAT del tráfico hacia los pods, independientemente de dónde se ejecuten físicamente.
+> El `kube-proxy` mantiene reglas de `iptables` en el nodo worker para interceptar el tráfico entrante por el NodePort y hacer DNAT hacia el pod destino, independientemente de en qué nodo físico se esté ejecutando ese pod.
 
 ---
 
@@ -439,14 +447,14 @@ webapp-replicaset-gcdbx              1/1     Running   0          16m
   kube-scheduler asigna el nuevo Pod a worker.jmelol.lab
          │
          ▼
-  kubelet del worker instruye a containerd para usar nginx:alpine
-  (imagen ya en caché → arranque ultrarrápido)
+  kubelet del worker instruye a containerd para usar melo15036/webapp:v1
+  (imagen ya en caché local → arranque ultrarrápido)
          │
          ▼
   Pod: Pending → ContainerCreating → Running  (≈ 2 segundos)
          │
          ▼
-  estado_actual (3 pods) == estado_deseado (3 replicas)
+  estado_actual (3 pods) == estado_deseado (3 replicas)  ✅
 ```
 
 **El responsable es el `ReplicaSet Controller`** (parte del `kube-controller-manager` en `master.jmelol.lab`). Él detecta la divergencia y ordena la creación. El `kube-scheduler` elige el nodo, y el `kubelet` del worker materializa el contenedor. Ningún administrador interviene.
@@ -474,35 +482,36 @@ webapp-replicaset-gcdbx              1/1     Running   0          16m
 │  etcd            │   │  containerd                            │
 │  coredns (x2)    │   │  kube-flannel-ds                       │
 │  kube-flannel-ds │   │                                        │
-│                  │   │  webapp-deployment-* (x3 pods)         │
-│                  │   │  webapp-replicaset-* (x3 pods)         │
+│                  │   │  webapp-deployment-* (x3 pods :5000)   │
+│                  │   │  webapp-replicaset-* (x3 pods :5000)   │
 └──────────────────┘   └────────────────────────────────────────┘
      Red overlay Flannel VXLAN: 10.244.0.0/16
      ClusterIP webapp-service:  10.96.46.87:80
-     NodePort externo:          :30001/TCP
+     NodePort externo:          :30001/TCP → targetPort :5000
 ```
 
 ### Tabla de recursos desplegados
 
-| Recurso | Nombre | Réplicas | Imagen | Puerto |
-|---------|--------|----------|--------|--------|
-| Deployment | `webapp-deployment` | 3 | `nginx:alpine` | 80 |
-| ReplicaSet | `webapp-replicaset` | 3 | `nginx:alpine` | 80 |
-| Service | `webapp-service` | — | NodePort | 30001→80 |
+| Recurso | Nombre | Réplicas | Imagen | Puerto contenedor |
+|---------|--------|----------|--------|-------------------|
+| Deployment | `webapp-deployment` | 3 | `melo15036/webapp:v1` | 5000 |
+| ReplicaSet | `webapp-replicaset` | 3 | `melo15036/webapp:v1` | 5000 |
+| Service | `webapp-service` | — | NodePort | 30001→80→5000 |
 | ConfigMap | `webapp-configmap` | — | — | `APP_ENV=production` |
 | Secret | `db-secrets` | — | — | credenciales BD |
-| Secret | `regcred` | — | — | credenciales registro |
+| Secret | `regcred` | — | — | credenciales Docker Hub |
 
 ### Resumen de comandos ejecutados
 
 | Fase | Comando | Resultado |
 |------|---------|-----------|
+| 0 | `docker build / tag / push` | Imagen `melo15036/webapp:v1` publicada |
 | 1 | `kubectl get nodes -o wide` | master + worker en `Ready` |
 | 1 | `git clone mariocr73/K8S-apps.git` | repo clonado en ns1 |
 | 2 | Loop `cat *.yaml` | 6 recursos identificados, 4 corregidos |
 | 3 | `kubectl apply -f .` | 6 recursos creados (2do intento OK) |
 | 3 | `kubectl get pods/deployments/services` | todos `Running` |
-| 4 | `curl http://192.168.50.21:30001` | HTML nginx en worker y master |
+| 4 | `curl http://192.168.50.21:30001` | respuesta de la aplicación |
 | 5 | `kubectl scale deployment webapp-deployment --replicas=3` | 3er pod en ~14s |
 | 6 | `kubectl delete pod webapp-deployment-...-hd9mc` | pod recreado en ~2s |
 
@@ -512,7 +521,7 @@ webapp-replicaset-gcdbx              1/1     Running   0          16m
 
 Esta práctica demuestra cómo Kubernetes, operado desde su nivel más fundamental (`kubeadm` sobre VMs), ofrece capacidades de orquestación como auto-recuperación en segundos, escalamiento declarativo y balanceo de tráfico transparente entre nodos.
 
-Existió la necesidad de **corregir los manifiestos del repositorio original**: los Secrets contenían placeholders no codificados, las imágenes eran referencias inválidas y los puertos estaban desajustados entre el contenedor y el Service. 
+El proceso incluyó la construcción de una imagen Docker propia (`melo15036/webapp:v1`) publicada en Docker Hub, completando así el flujo real que propone el README del repositorio original: desde el código fuente hasta una aplicación corriendo en el clúster. Adicionalmente fue necesario **corregir los manifiestos del repositorio**: los Secrets contenían placeholders no codificados, las imágenes eran referencias inválidas y los puertos estaban desajustados entre el contenedor y el Service.
 
 La diferencia fundamental respecto a un entorno gestionado es la **visibilidad total**: en este clúster se puede observar directamente cómo el `kube-controller-manager` reconcilia el estado del ReplicaSet, cómo `kube-proxy` reescribe las reglas de `iptables` para el NodePort, y cómo Flannel encapsula el tráfico entre pods.
 
@@ -535,10 +544,8 @@ k8s-practica-2026/
     ├── 02-kubectl-get-pods-running.png
     ├── 03-kubectl-get-deployments-services.png
     ├── 04-aplicacion-accesible.png
-    ├── 04-aplicacion-accesible2.png
     ├── 05-escalamiento-3-pods.png
     └── 06-self-healing.png
 ```
 
 ---
-
